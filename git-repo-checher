@@ -109,6 +109,14 @@ while read -r git_dir; do
     # Navigate to the repository
     cd "$repo_dir" || continue
     
+    # Check if remote repository exists
+    if ! git ls-remote >/dev/null 2>&1; then
+        error_repos=$((error_repos + 1))
+        error_msg="No remote repository configured."
+        send_notification "$repo_name" "error" "$error_msg"
+        continue
+    fi
+
     # Check if there's a connection error
     if ! git fetch --quiet 2>/dev/null; then
         error_repos=$((error_repos + 1))
