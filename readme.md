@@ -15,7 +15,7 @@ A bash script that recursively searches directories for git repositories, checks
 
 1. Download the script:
    ```bash
-   curl -O https://raw.githubusercontent.com/yourusername/git-repo-checker/main/git-repo-checker
+   curl -O https://raw.githubusercontent.com/AlessandroPerazzetta/git-repository-checker/main/git-repo-checher
    ```
 
 2. Make it executable:
