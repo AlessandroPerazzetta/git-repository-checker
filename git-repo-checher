@@ -1,0 +1,189 @@
+#!/bin/bash
+
+# Git Repository Update Checker
+# This script recursively searches for git repositories in a specified directory,
+# checks if there are updates available, and provides notifications.
+
+# Default directory is the current directory if not specified
+SEARCH_DIR="${1:-$(pwd)}"
+NOTIFICATION_METHOD="${2:-terminal}"  # Options: terminal, notify-send, both
+
+# Text formatting
+BOLD="\033[1m"
+GREEN="\033[0;32m"
+YELLOW="\033[0;33m"
+RED="\033[0;31m"
+BLUE="\033[0;34m"
+RESET="\033[0m"
+
+# Print script banner
+echo -e "${BOLD}${BLUE}Git Repository Update Checker${RESET}"
+echo -e "Searching for git repositories in: ${BOLD}${SEARCH_DIR}${RESET}\n"
+
+# Function to check if command exists
+command_exists() {
+    command -v "$1" &> /dev/null
+}
+
+# Check if git is installed
+if ! command_exists git; then
+    echo -e "${RED}Error: git command not found. Please install git.${RESET}"
+    exit 1
+fi
+
+# Check if notify-send is available if requested
+if [[ "$NOTIFICATION_METHOD" == "notify-send" || "$NOTIFICATION_METHOD" == "both" ]]; then
+    if ! command_exists notify-send; then
+        echo -e "${YELLOW}Warning: notify-send command not found. Falling back to terminal output only.${RESET}"
+        NOTIFICATION_METHOD="terminal"
+    fi
+fi
+
+# Function to send notification
+send_notification() {
+    local repo_name="$1"
+    local status="$2"
+    local details="$3"
+    
+    # Terminal output
+    if [[ "$NOTIFICATION_METHOD" == "terminal" || "$NOTIFICATION_METHOD" == "both" ]]; then
+        if [[ "$status" == "updates" ]]; then
+            echo -e "${YELLOW}[UPDATES]${RESET} ${BOLD}$repo_name${RESET}"
+            echo -e "$details\n"
+        elif [[ "$status" == "error" ]]; then
+            echo -e "${RED}[ERROR]${RESET} ${BOLD}$repo_name${RESET}"
+            echo -e "$details\n"
+        elif [[ "$status" == "current" ]]; then
+            echo -e "${GREEN}[CURRENT]${RESET} ${BOLD}$repo_name${RESET}\n"
+        fi
+    fi
+    
+    # Desktop notification
+    if [[ "$NOTIFICATION_METHOD" == "notify-send" || "$NOTIFICATION_METHOD" == "both" ]]; then
+        if [[ "$status" == "updates" ]]; then
+            notify-send -u normal "Git Updates Available" "Repository: $repo_name\n$details"
+        elif [[ "$status" == "error" ]]; then
+            notify-send -u critical "Git Repository Error" "Repository: $repo_name\n$details"
+        fi
+        # No notification for current repos to avoid spam
+    fi
+}
+
+# Count variables
+total_repos=0
+current_repos=0
+updatable_repos=0
+error_repos=0
+
+# Find all git repositories
+# find "$SEARCH_DIR" -type d -name ".git" 2>/dev/null | while read -r git_dir; do
+
+# Fix issue is related to how variables work within a pipeline in Bash. The `while` loop is being executed in a subshell because it's part of a pipeline with `find`, and any variables modified inside the subshell won't persist in the parent shell.
+# Here's what's happening:
+# 1. The `find` command pipes its output to `while`
+# 2. This creates a subshell where the `while` loop runs
+# 3. All variable modifications (`total_repos`, `current_repos`, etc.) happen in this subshell
+# 4. When the subshell exits, these changes are lost
+# 5. The parent shell still sees the original values (all zeros)
+# Here's how to fix it:
+# ````bash
+# # Option 1: Use process substitution
+# while read -r git_dir; do
+#     # ...existing code...
+# done < <(find "$SEARCH_DIR" -type d -name ".git" 2>/dev/null)
+# 
+# # Option 2: Save find results to an array first
+# mapfile -t git_dirs < <(find "$SEARCH_DIR" -type d -name ".git" 2>/dev/null)
+# for git_dir in "${git_dirs[@]}"; do
+#     # ...existing code...
+# done
+# ````
+# Both solutions avoid the pipeline and prevent the subshell creation, allowing the variable modifications to persist in the parent shell.
+# This is a common "gotcha" in Bash scripting known as the "pipeline subshell problem". Any command connected by pipes (`|`) runs in its own subshell, which means variable assignments inside the pipeline won't affect the parent shell's variables.
+
+while read -r git_dir; do
+    repo_dir="${git_dir%.git}"
+    repo_name=$(basename "$repo_dir")
+    total_repos=$((total_repos + 1))
+    
+    # Navigate to the repository
+    cd "$repo_dir" || continue
+    
+    # Check if there's a connection error
+    if ! git fetch --quiet 2>/dev/null; then
+        error_repos=$((error_repos + 1))
+        error_msg="Failed to fetch updates. Check network connection or repository configuration."
+        send_notification "$repo_name" "error" "$error_msg"
+        continue
+    fi
+    
+    # Check for updates
+    LOCAL=$(git rev-parse @)
+    REMOTE=$(git rev-parse "@{u}" 2>/dev/null)
+    BASE=$(git merge-base @ "@{u}" 2>/dev/null)
+    
+    # Handle error cases
+    if [[ $? -ne 0 ]]; then
+        error_repos=$((error_repos + 1))
+        error_msg="Failed to check updates. Branch might not have an upstream."
+        send_notification "$repo_name" "error" "$error_msg"
+        continue
+    fi
+    
+    # Compare revisions
+    if [[ "$LOCAL" == "$REMOTE" ]]; then
+        # Repository is up-to-date
+        current_repos=$((current_repos + 1))
+        send_notification "$repo_name" "current"
+    elif [[ "$LOCAL" == "$BASE" ]]; then
+        # Need to pull
+        updatable_repos=$((updatable_repos + 1))
+        
+        # Get the number of commits behind
+        behind_count=$(git rev-list --count HEAD..@{u})
+        
+        # Get latest commit messages that would be pulled
+        commit_messages=$(git log --pretty=format:"- %s" -n 3 HEAD..@{u})
+        if [[ -n "$commit_messages" ]]; then
+            preview="${commit_messages}"
+            if [[ "$behind_count" -gt 3 ]]; then
+                preview="${preview}\n- ... and $((behind_count - 3)) more commits"
+            fi
+        else
+            preview="New updates available"
+        fi
+        
+        update_msg="Branch is behind by ${behind_count} commit(s).\n${preview}"
+        send_notification "$repo_name" "updates" "$update_msg"
+    elif [[ "$REMOTE" == "$BASE" ]]; then
+        # Need to push
+        updatable_repos=$((updatable_repos + 1))
+        ahead_count=$(git rev-list --count @{u}..HEAD)
+        update_msg="Local branch is ahead by ${ahead_count} commit(s). Push needed."
+        send_notification "$repo_name" "updates" "$update_msg"
+    else
+        # Branches have diverged
+        updatable_repos=$((updatable_repos + 1))
+        ahead_count=$(git rev-list --count @{u}..HEAD)
+        behind_count=$(git rev-list --count HEAD..@{u})
+        update_msg="Branches have diverged. Local is ahead by ${ahead_count} and behind by ${behind_count} commit(s)."
+        send_notification "$repo_name" "updates" "$update_msg"
+    fi
+# done
+done < <(find "$SEARCH_DIR" -type d -name ".git" 2>/dev/null)
+
+# Print summary
+echo -e "${BOLD}Summary:${RESET}"
+echo -e "Total repositories found: ${BOLD}$total_repos${RESET}"
+echo -e "Up-to-date repositories: ${GREEN}${BOLD}$current_repos${RESET}"
+echo -e "Repositories with updates: ${YELLOW}${BOLD}$updatable_repos${RESET}"
+echo -e "Repositories with errors: ${RED}${BOLD}$error_repos${RESET}"
+
+# Usage instructions
+if [[ $total_repos -eq 0 ]]; then
+    echo -e "\n${YELLOW}No git repositories found in $SEARCH_DIR${RESET}"
+    echo -e "\nUsage: $0 [search_directory] [notification_method]"
+    echo -e "notification_method options: terminal, notify-send, both"
+fi
+
+exit 0
